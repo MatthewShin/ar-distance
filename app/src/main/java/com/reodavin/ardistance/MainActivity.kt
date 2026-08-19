@@ -1,15 +1,21 @@
 package com.reodavin.ardistance
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.opengl.GLSurfaceView
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -21,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -102,11 +110,25 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val context = LocalContext.current
+        val vibrator = remember { context.getVibratorCompat() }
+        val distanceMeters = (measurementState as? MeasurementState.Tracking)?.distanceMeters
+        val isProximityWarning = distanceMeters != null && distanceMeters < PROXIMITY_WARNING_METERS
+
+        // 임계값 아래로 "새로 진입"할 때만 1회 진동 (계속 붙어있는 동안 반복 진동하지 않도록).
+        var wasWarning by remember { mutableStateOf(false) }
+        LaunchedEffect(isProximityWarning) {
+            if (isProximityWarning && !wasWarning) {
+                vibrator.vibrateOnce()
+            }
+            wasWarning = isProximityWarning
+        }
+
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    GLSurfaceView(context).apply {
+                factory = { glContext ->
+                    GLSurfaceView(glContext).apply {
                         setEGLContextClientVersion(2)
                         setRenderer(
                             ArRenderer(arSessionManager, frameProcessor) { frameStatus ->
@@ -166,18 +188,8 @@ class MainActivity : ComponentActivity() {
                     .padding(8.dp),
             )
 
-            val trackingState = measurementState as? MeasurementState.Tracking
-            if (trackingState != null) {
-                Text(
-                    text = trackingState.distanceMeters?.let { "%.2f m".format(it) } ?: "거리 측정 중…",
-                    color = Color.Yellow,
-                    fontSize = 32.sp,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .padding(horizontal = 20.dp, vertical = 8.dp),
-                )
-            }
+            // 거리 텍스트는 이제 BoxSelectionOverlay가 실제 추적 위치(박스 사이 또는
+            // 화면 하단→박스)에 선과 함께 그린다 — 화면 정중앙 고정 표시는 제거 (TODO §3D 렌더링).
 
             if (measurementState !is MeasurementState.SelectingMode) {
                 Text(
@@ -201,6 +213,24 @@ class MainActivity : ComponentActivity() {
                     .padding(16.dp),
             ) {
                 Text("초기화")
+            }
+
+            if (isProximityWarning) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .border(width = 12.dp, color = Color.Red),
+                )
+                Text(
+                    text = "근접 경고: %.2f m".format(distanceMeters),
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(16.dp)
+                        .background(Color.Red.copy(alpha = 0.8f))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
             }
         }
     }
@@ -228,6 +258,28 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         arSessionManager.close()
+    }
+}
+
+/** 거리가 이 값(미터) 미만이면 근접 경고를 표시한다. TODO: 사용자가 조절 가능하게 만들 수 있음. */
+private const val PROXIMITY_WARNING_METERS = 0.3f
+
+private fun Context.getVibratorCompat(): Vibrator {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val manager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+        manager.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    }
+}
+
+private fun Vibrator.vibrateOnce() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
+    } else {
+        @Suppress("DEPRECATION")
+        vibrate(200)
     }
 }
 

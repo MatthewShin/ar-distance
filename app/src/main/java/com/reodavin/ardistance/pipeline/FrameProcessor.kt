@@ -224,7 +224,11 @@ class FrameProcessor(
         return Unprojector.Intrinsics(fx = focal[0], fy = focal[1], cx = principal[0], cy = principal[1])
     }
 
-    /** depth 이미지는 카메라 이미지보다 해상도가 낮은 경우가 많아 좌표를 비율로 스케일링한다 (계획 §4.5). */
+    /**
+     * depth 이미지는 카메라 이미지보다 해상도가 낮은 경우가 많아 좌표를 비율로 스케일링한다 (계획 §4.5).
+     * 중심 픽셀 1개만 읽으면 depth 센서 노이즈에 취약해, 3x3 이웃의 유효값(0 초과)들 중
+     * 중앙값(median)을 사용한다 (TODO §depth 노이즈 완화 — 이상치에 강하고 계산이 단순함).
+     */
     private fun sampleDepthMeters(
         depthImage: Image,
         u: Float,
@@ -234,19 +238,34 @@ class FrameProcessor(
     ): Float? {
         val depthWidth = depthImage.width
         val depthHeight = depthImage.height
-        val depthX = ((u / cameraImageWidth) * depthWidth).toInt().coerceIn(0, depthWidth - 1)
-        val depthY = ((v / cameraImageHeight) * depthHeight).toInt().coerceIn(0, depthHeight - 1)
+        val centerX = ((u / cameraImageWidth) * depthWidth).toInt().coerceIn(0, depthWidth - 1)
+        val centerY = ((v / cameraImageHeight) * depthHeight).toInt().coerceIn(0, depthHeight - 1)
 
         val plane = depthImage.planes[0]
         val buffer = plane.buffer
-        val byteIndex = depthY * plane.rowStride + depthX * plane.pixelStride
-        if (byteIndex < 0 || byteIndex + 1 >= buffer.limit()) return null
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val limit = buffer.limit()
 
-        val low = buffer.get(byteIndex).toInt() and 0xFF
-        val high = buffer.get(byteIndex + 1).toInt() and 0xFF
-        val depthMm = (high shl 8) or low
-        if (depthMm <= 0) return null
-        return depthMm / 1000f
+        val samplesMm = mutableListOf<Int>()
+        for (dy in -1..1) {
+            for (dx in -1..1) {
+                val x = (centerX + dx).coerceIn(0, depthWidth - 1)
+                val y = (centerY + dy).coerceIn(0, depthHeight - 1)
+                val byteIndex = y * rowStride + x * pixelStride
+                if (byteIndex < 0 || byteIndex + 1 >= limit) continue
+
+                val low = buffer.get(byteIndex).toInt() and 0xFF
+                val high = buffer.get(byteIndex + 1).toInt() and 0xFF
+                val depthMm = (high shl 8) or low
+                if (depthMm > 0) samplesMm.add(depthMm)
+            }
+        }
+
+        if (samplesMm.isEmpty()) return null
+        samplesMm.sort()
+        val medianMm = samplesMm[samplesMm.size / 2]
+        return medianMm / 1000f
     }
 
     private fun imageToGrayMat(image: Image): Mat {
