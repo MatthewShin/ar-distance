@@ -1,0 +1,30 @@
+package com.reodavin.ardistance.pipeline
+
+/**
+ * 앱 전체의 측정 흐름 상태 (계획 §3, + 1타겟/2타겟 모드 확장).
+ *
+ * [SelectingMode] → [SelectingBox1] → (2타겟 모드면 [SelectingBox2]) → [Tracking] 순서로 진행한다.
+ * [Tracking]의 box1/box2는 [FrameProcessor]가 매 프레임 갱신하는 화면(VIEW) 좌표계 사각형이다.
+ * 1타겟 모드에서는 box2/box2Lost가 항상 사용되지 않는다(null/false 고정).
+ */
+sealed class MeasurementState {
+    /** 앱 시작 직후 — 1타겟/2타겟 모드를 선택해야 하는 상태. */
+    data object SelectingMode : MeasurementState()
+
+    /** 박스1(1타겟 모드에서는 유일한 박스)을 아직 지정하지 않은 상태. */
+    data class SelectingBox1(val mode: MeasurementMode) : MeasurementState()
+
+    /** (2타겟 모드 전용) 박스1은 확정됐고, 박스2를 지정해야 하는 상태. */
+    data class SelectingBox2(val mode: MeasurementMode, val box1: PixelRect) : MeasurementState()
+
+    /** 지정이 끝나 실시간 추적 중인 상태. */
+    data class Tracking(
+        val mode: MeasurementMode,
+        val box1: PixelRect?,
+        val box2: PixelRect?,
+        val box1Lost: Boolean = false,
+        val box2Lost: Boolean = false,
+        /** 실측 거리(미터). depth 무효 프레임에서는 갱신되지 않고 이전 값을 유지한다 (계획 §6). */
+        val distanceMeters: Float? = null,
+    ) : MeasurementState()
+}
