@@ -1,7 +1,10 @@
 package com.reodavin.ardistance.ui
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -25,14 +28,20 @@ import com.reodavin.ardistance.pipeline.MeasurementState
 import com.reodavin.ardistance.pipeline.PixelRect
 
 private const val MIN_BOX_SIZE_PX = 20f
+private const val TAP_BOX_RADIUS_PX = 70f
 private val BOX1_COLOR = Color(0xFFFF5252) // 빨강
 private val BOX2_COLOR = Color(0xFF448AFF) // 파랑
 private val DISTANCE_LINE_COLOR = Color(0xFFFFEB3B) // 노랑
 
 /**
- * 드래그로 박스1 → 박스2를 순서대로 지정하는 오버레이 (계획 §3).
+ * 드래그(또는 탭)로 박스1 → 박스2를 순서대로 지정하는 오버레이 (계획 §3).
  * [MeasurementState.Tracking] 상태에서는 [FrameProcessor]가 갱신하는 박스 위치를 그대로 그리고
  * 추가 드래그는 무시한다 (재지정은 초기화 버튼으로만 가능).
+ *
+ * 드래그 크기가 [MIN_BOX_SIZE_PX] 미만이면(=거의 움직이지 않은 탭) 그 지점을 중심으로
+ * 반지름 [TAP_BOX_RADIUS_PX]의 고정 크기 박스를 만든다 — 별도 모드 전환 없이 드래그와 탭을
+ * 한 제스처로 통합한다. 사물 크기에 맞춰 정밀하게 지정하고 싶으면 드래그를, 빠르게 점 하나만
+ * 찍고 싶으면 탭을 쓰면 된다.
  *
  * [zoomFactor]는 [com.reodavin.ardistance.ar.CameraBackgroundRenderer]가 그리는 디지털 줌 배율과
  * 동일한 값을 받는다(1.0 = 줌 없음). 줌은 화면 표시/터치 좌표 해석에만 관여하고
@@ -57,29 +66,41 @@ fun BoxSelectionOverlay(
             .pointerInput(canDraw, zoomFactor) {
                 if (!canDraw) return@pointerInput
                 val center = Offset(size.width / 2f, size.height / 2f)
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        dragStart = offset
-                        dragCurrent = offset
-                    },
-                    onDrag = { change, _ ->
+                // detectDragGestures는 터치 슬롭(기기별 ~18dp)을 넘지 않으면 onDragStart 자체가
+                // 호출되지 않아 "제자리 탭"을 아예 놓친다. 탭도 확실히 잡기 위해 awaitEachGesture로
+                // 직접 구현: 손을 뗄 때까지 슬롭을 못 넘으면 탭(고정 크기 박스), 넘으면 드래그로 처리.
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    dragStart = down.position
+                    dragCurrent = down.position
+
+                    val slopChange = awaitTouchSlopOrCancellation(down.id) { change, _ ->
+                        change.consume()
                         dragCurrent = change.position
-                    },
-                    onDragEnd = {
-                        // 화면(터치, 줌 적용) 좌표의 드래그 크기 기준으로 최소 크기를 판단하고,
-                        // 실제 트래커 init에는 논리(줌 없음) 좌표로 변환해 넘긴다.
-                        val screenRect = boundingRect(dragStart, dragCurrent)
-                        if (screenRect != null && screenRect.width >= MIN_BOX_SIZE_PX && screenRect.height >= MIN_BOX_SIZE_PX) {
-                            onBoxConfirmed(screenRect.zoomedOut(center, zoomFactor))
+                    }
+
+                    if (slopChange != null) {
+                        drag(slopChange.id) { change ->
+                            dragCurrent = change.position
+                            change.consume()
                         }
-                        dragStart = null
-                        dragCurrent = null
-                    },
-                    onDragCancel = {
-                        dragStart = null
-                        dragCurrent = null
-                    },
-                )
+                    }
+
+                    // 화면(터치, 줌 적용) 좌표 기준으로 드래그인지 탭인지 판단하고,
+                    // 실제 트래커 init에는 논리(줌 없음) 좌표로 변환해 넘긴다.
+                    val screenRect = boundingRect(dragStart, dragCurrent)
+                    val finalRect = if (screenRect != null &&
+                        screenRect.width >= MIN_BOX_SIZE_PX &&
+                        screenRect.height >= MIN_BOX_SIZE_PX
+                    ) {
+                        screenRect
+                    } else {
+                        dragStart?.let { tapPoint -> fixedBoxAt(tapPoint, TAP_BOX_RADIUS_PX) }
+                    }
+                    finalRect?.let { onBoxConfirmed(it.zoomedOut(center, zoomFactor)) }
+                    dragStart = null
+                    dragCurrent = null
+                }
             },
     ) {
         val center = Offset(size.width / 2f, size.height / 2f)
@@ -105,6 +126,16 @@ fun BoxSelectionOverlay(
             }
         }
     }
+}
+
+/** 탭 지점을 중심으로 한 고정 크기(반지름 [radius]) 정사각형 박스. */
+private fun fixedBoxAt(point: Offset, radius: Float): PixelRect {
+    return PixelRect(
+        left = point.x - radius,
+        top = point.y - radius,
+        right = point.x + radius,
+        bottom = point.y + radius,
+    )
 }
 
 private fun boundingRect(start: Offset?, end: Offset?): PixelRect? {
