@@ -55,6 +55,12 @@ class MeasurementViewModel : ViewModel() {
             box2 = result.box2?.viewRect ?: current.box2,
             box2Lost = result.box2?.isLost ?: current.box2Lost,
             distanceMeters = result.distanceMeters ?: current.distanceMeters,
+            // distanceMeters가 새로 갱신될 때만 신뢰도 플래그도 함께 갱신한다.
+            distanceLowConfidence = if (result.distanceMeters != null) {
+                result.distanceLowConfidence
+            } else {
+                current.distanceLowConfidence
+            },
         )
     }
 

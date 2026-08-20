@@ -22,12 +22,23 @@ import org.opencv.core.Rect as CvRect
 /** [viewRect]는 이번 프레임에 새로 갱신된 값일 때만 non-null (놓쳤거나 트래커가 없으면 null). */
 data class TrackedBox(val viewRect: PixelRect?, val isLost: Boolean)
 
-/** [distanceMeters]는 이번 프레임에 새로 계산됐을 때만 non-null — 무효 프레임은 이전 값을 유지해야 한다(계획 §6). */
+/**
+ * [distanceMeters]는 이번 프레임에 새로 계산됐을 때만 non-null — 무효 프레임은 이전 값을 유지해야 한다(계획 §6).
+ * [distanceLowConfidence]도 [distanceMeters]가 non-null일 때만 의미 있다 — ARCore의 raw depth
+ * confidence가 낮은 샘플이 많았다는 뜻으로, 장거리/저텍스처 등에서 값을 신뢰하기 어려울 수 있다.
+ */
 data class FrameResult(
     val box1: TrackedBox?,
     val box2: TrackedBox?,
     val distanceMeters: Float?,
+    val distanceLowConfidence: Boolean = false,
 )
+
+/** [sampleDepthMeters]의 결과 — depth 값과 함께, 샘플 중 신뢰도 높은 픽셀의 비율을 담는다. */
+private data class DepthSample(val depthMeters: Float, val highConfidenceRatio: Float)
+
+/** 두 지점을 이용한 거리 계산 결과. */
+private data class DistanceMeasurement(val meters: Float, val lowConfidence: Boolean)
 
 /**
  * 매 프레임 카메라 CPU 이미지를 그레이스케일 Mat으로 변환해 박스 트래커(인덱스 0/1)를 갱신하고,
@@ -131,7 +142,7 @@ class FrameProcessor(
                 }
             }
 
-            val distance = when (mode) {
+            val measurement = when (mode) {
                 MeasurementMode.ONE_TARGET -> computeDistanceToCameraMeters(
                     frame = frame,
                     cameraImageWidth = cameraImageWidth,
@@ -147,7 +158,14 @@ class FrameProcessor(
                 )
             }
 
-            onResult(FrameResult(box1 = trackedBoxes[0], box2 = trackedBoxes[1], distanceMeters = distance))
+            onResult(
+                FrameResult(
+                    box1 = trackedBoxes[0],
+                    box2 = trackedBoxes[1],
+                    distanceMeters = measurement?.meters,
+                    distanceLowConfidence = measurement?.lowConfidence ?: false,
+                )
+            )
         } finally {
             gray.release()
         }
@@ -160,30 +178,29 @@ class FrameProcessor(
         cameraImageHeight: Int,
         rect1: PixelRect?,
         rect2: PixelRect?,
-    ): Float? {
+    ): DistanceMeasurement? {
         if (rect1 == null || rect2 == null) return null
 
-        val depthImage = try {
-            frame.acquireDepthImage16Bits()
-        } catch (e: Exception) {
-            // Depth API 미지원 기기, 아직 depth 프레임 미준비 등 (계획 §7) — 조용히 이번 프레임은 건너뜀.
-            return null
-        }
+        val (depthImage, confidenceImage) = acquireRawDepthWithConfidence(frame) ?: return null
 
         return try {
             val intr = imageIntrinsicsOf(frame)
-            val depth1 = sampleDepthMeters(depthImage, rect1, cameraImageWidth, cameraImageHeight)
-            val depth2 = sampleDepthMeters(depthImage, rect2, cameraImageWidth, cameraImageHeight)
-            if (depth1 == null || depth2 == null) return null
+            val sample1 = sampleDepthMeters(depthImage, confidenceImage, rect1, cameraImageWidth, cameraImageHeight)
+            val sample2 = sampleDepthMeters(depthImage, confidenceImage, rect2, cameraImageWidth, cameraImageHeight)
+            if (sample1 == null || sample2 == null) return null
 
-            val camPoint1 = Unprojector.unproject(rect1.centerX, rect1.centerY, depth1, intr)
-            val camPoint2 = Unprojector.unproject(rect2.centerX, rect2.centerY, depth2, intr)
+            val camPoint1 = Unprojector.unproject(rect1.centerX, rect1.centerY, sample1.depthMeters, intr)
+            val camPoint2 = Unprojector.unproject(rect2.centerX, rect2.centerY, sample2.depthMeters, intr)
             val worldPoint1 = PoseTransform.toWorld(camPoint1, frame.camera.pose)
             val worldPoint2 = PoseTransform.toWorld(camPoint2, frame.camera.pose)
 
-            distanceCalculator.update(worldPoint1, worldPoint2)
+            val meters = distanceCalculator.update(worldPoint1, worldPoint2)
+            val lowConfidence = sample1.highConfidenceRatio < MIN_HIGH_CONFIDENCE_RATIO ||
+                sample2.highConfidenceRatio < MIN_HIGH_CONFIDENCE_RATIO
+            DistanceMeasurement(meters, lowConfidence)
         } finally {
             depthImage.close()
+            confidenceImage.close()
         }
     }
 
@@ -197,23 +214,42 @@ class FrameProcessor(
         cameraImageWidth: Int,
         cameraImageHeight: Int,
         rect1: PixelRect?,
-    ): Float? {
+    ): DistanceMeasurement? {
         if (rect1 == null) return null
 
-        val depthImage = try {
-            frame.acquireDepthImage16Bits()
-        } catch (e: Exception) {
-            return null
-        }
+        val (depthImage, confidenceImage) = acquireRawDepthWithConfidence(frame) ?: return null
 
         return try {
             val intr = imageIntrinsicsOf(frame)
-            val depth1 = sampleDepthMeters(depthImage, rect1, cameraImageWidth, cameraImageHeight)
+            val sample1 = sampleDepthMeters(depthImage, confidenceImage, rect1, cameraImageWidth, cameraImageHeight)
                 ?: return null
-            val camPoint1 = Unprojector.unproject(rect1.centerX, rect1.centerY, depth1, intr)
-            distanceCalculator.update(camPoint1, CAMERA_ORIGIN)
+            val camPoint1 = Unprojector.unproject(rect1.centerX, rect1.centerY, sample1.depthMeters, intr)
+            val meters = distanceCalculator.update(camPoint1, CAMERA_ORIGIN)
+            DistanceMeasurement(meters, sample1.highConfidenceRatio < MIN_HIGH_CONFIDENCE_RATIO)
         } finally {
             depthImage.close()
+            confidenceImage.close()
+        }
+    }
+
+    /**
+     * ARCore의 raw depth(필터링 전 원본)와, 픽셀별 신뢰도(0~255, [Frame.acquireRawDepthConfidenceImage])를
+     * 함께 가져온다. smoothed depth([Frame.acquireDepthImage16Bits])는 신뢰도 정보가 없어 저신뢰
+     * 픽셀을 걸러낼 수 없으므로, 신뢰도 기반 필터링을 위해 raw 쪽으로 전환했다.
+     */
+    private fun acquireRawDepthWithConfidence(frame: Frame): Pair<Image, Image>? {
+        return try {
+            val depthImage = frame.acquireRawDepthImage16Bits()
+            try {
+                val confidenceImage = frame.acquireRawDepthConfidenceImage()
+                depthImage to confidenceImage
+            } catch (e: Exception) {
+                depthImage.close()
+                null
+            }
+        } catch (e: Exception) {
+            // Depth API 미지원 기기, 아직 raw depth 프레임 미준비 등 (계획 §7) — 조용히 이번 프레임은 건너뜀.
+            null
         }
     }
 
@@ -225,61 +261,85 @@ class FrameProcessor(
     }
 
     /**
-     * depth 이미지는 카메라 이미지보다 해상도가 낮은 경우가 많아 좌표를 비율로 스케일링한다 (계획 §4.5).
+     * depth/confidence 이미지는 카메라 이미지보다 해상도가 낮은 경우가 많아 좌표를 비율로 스케일링한다 (계획 §4.5).
      *
-     * 중심 픽셀 근처 몇 개만 보면 depth 센서 노이즈나 엣지/반사 등으로 인한 튀는 값에 취약하다.
-     * 대신 박스 내부(가장자리는 배경이 섞일 수 있어 [INSET_RATIO]만큼 안쪽으로 줄인 영역)에
-     * [GRID_SIZE] x [GRID_SIZE] 격자로 다중 포인트를 샘플링하고, 정렬 후 상하위 [TRIM_RATIO]를
-     * 잘라낸(trimmed) 나머지의 중앙값을 대표값으로 쓴다 — "여러 보조 지점을 찍어서 서로 비교해
-     * 이상치를 걸러내는" 방식으로, 단일 지점보다 훨씬 강건하다.
+     * 박스 내부(가장자리는 배경이 섞일 수 있어 [INSET_RATIO]만큼 안쪽으로 줄인 영역)에
+     * [GRID_SIZE] x [GRID_SIZE] 격자로 다중 포인트를 샘플링한다. 각 포인트마다 ARCore가 제공하는
+     * raw depth 신뢰도(0~255)도 함께 읽어서, 신뢰도가 [CONFIDENCE_THRESHOLD] 미만인 픽셀은
+     * "믿을 수 없는 값"으로 보고 최종 대표값(median) 계산에서 제외한다 — 장거리/저텍스처 등
+     * ARCore가 스스로 부정확하다고 판단한 픽셀을 걸러내는 것이다. 고신뢰 샘플이 너무 적으면
+     * (전체 대비 [MIN_HIGH_CONFIDENCE_RATIO] 미만) 신뢰도 필터링 없이 전체 유효 샘플을 대신 쓰되,
+     * 호출부가 [DepthSample.highConfidenceRatio]로 "이 값은 신뢰도가 낮다"는 걸 알 수 있게 한다.
      */
     private fun sampleDepthMeters(
         depthImage: Image,
+        confidenceImage: Image,
         rect: PixelRect,
         cameraImageWidth: Int,
         cameraImageHeight: Int,
-    ): Float? {
+    ): DepthSample? {
         val depthWidth = depthImage.width
         val depthHeight = depthImage.height
-        val plane = depthImage.planes[0]
-        val buffer = plane.buffer
-        val rowStride = plane.rowStride
-        val pixelStride = plane.pixelStride
-        val limit = buffer.limit()
+        val depthPlane = depthImage.planes[0]
+        val depthBuffer = depthPlane.buffer
+        val depthRowStride = depthPlane.rowStride
+        val depthPixelStride = depthPlane.pixelStride
+        val depthLimit = depthBuffer.limit()
+
+        val confWidth = confidenceImage.width
+        val confHeight = confidenceImage.height
+        val confPlane = confidenceImage.planes[0]
+        val confBuffer = confPlane.buffer
+        val confRowStride = confPlane.rowStride
+        val confPixelStride = confPlane.pixelStride
+        val confLimit = confBuffer.limit()
 
         val insetLeft = rect.left + rect.width * INSET_RATIO
         val insetTop = rect.top + rect.height * INSET_RATIO
         val insetWidth = rect.width * (1f - 2 * INSET_RATIO)
         val insetHeight = rect.height * (1f - 2 * INSET_RATIO)
 
-        val samplesMm = mutableListOf<Int>()
+        val allSamplesMm = mutableListOf<Int>()
+        val highConfSamplesMm = mutableListOf<Int>()
         for (gy in 0 until GRID_SIZE) {
             for (gx in 0 until GRID_SIZE) {
                 val u = insetLeft + insetWidth * (gx + 0.5f) / GRID_SIZE
                 val v = insetTop + insetHeight * (gy + 0.5f) / GRID_SIZE
+
                 val depthX = ((u / cameraImageWidth) * depthWidth).toInt().coerceIn(0, depthWidth - 1)
                 val depthY = ((v / cameraImageHeight) * depthHeight).toInt().coerceIn(0, depthHeight - 1)
-                val byteIndex = depthY * rowStride + depthX * pixelStride
-                if (byteIndex < 0 || byteIndex + 1 >= limit) continue
+                val depthByteIndex = depthY * depthRowStride + depthX * depthPixelStride
+                if (depthByteIndex < 0 || depthByteIndex + 1 >= depthLimit) continue
 
-                val low = buffer.get(byteIndex).toInt() and 0xFF
-                val high = buffer.get(byteIndex + 1).toInt() and 0xFF
+                val low = depthBuffer.get(depthByteIndex).toInt() and 0xFF
+                val high = depthBuffer.get(depthByteIndex + 1).toInt() and 0xFF
                 val depthMm = (high shl 8) or low
-                if (depthMm > 0) samplesMm.add(depthMm)
+                if (depthMm <= 0) continue
+                allSamplesMm.add(depthMm)
+
+                val confX = ((u / cameraImageWidth) * confWidth).toInt().coerceIn(0, confWidth - 1)
+                val confY = ((v / cameraImageHeight) * confHeight).toInt().coerceIn(0, confHeight - 1)
+                val confByteIndex = confY * confRowStride + confX * confPixelStride
+                if (confByteIndex < 0 || confByteIndex >= confLimit) continue
+                val confidence = confBuffer.get(confByteIndex).toInt() and 0xFF
+                if (confidence >= CONFIDENCE_THRESHOLD) highConfSamplesMm.add(depthMm)
             }
         }
 
-        if (samplesMm.isEmpty()) return null
-        samplesMm.sort()
+        if (allSamplesMm.isEmpty()) return null
 
-        val trimCount = (samplesMm.size * TRIM_RATIO).toInt()
-        val trimmed = if (samplesMm.size - trimCount * 2 >= 1) {
-            samplesMm.subList(trimCount, samplesMm.size - trimCount)
+        val highConfidenceRatio = highConfSamplesMm.size.toFloat() / allSamplesMm.size
+        val sourceMm = if (highConfSamplesMm.size >= MIN_HIGH_CONF_SAMPLE_COUNT) highConfSamplesMm else allSamplesMm
+        sourceMm.sort()
+
+        val trimCount = (sourceMm.size * TRIM_RATIO).toInt()
+        val trimmed = if (sourceMm.size - trimCount * 2 >= 1) {
+            sourceMm.subList(trimCount, sourceMm.size - trimCount)
         } else {
-            samplesMm
+            sourceMm
         }
         val medianMm = trimmed[trimmed.size / 2]
-        return medianMm / 1000f
+        return DepthSample(depthMeters = medianMm / 1000f, highConfidenceRatio = highConfidenceRatio)
     }
 
     private fun imageToGrayMat(image: Image): Mat {
@@ -337,5 +397,14 @@ class FrameProcessor(
 
         /** 정렬된 depth 샘플의 상하위 이 비율만큼을 이상치로 보고 잘라낸다. */
         private const val TRIM_RATIO = 0.2f
+
+        /** raw depth confidence(0~255) 값이 이 이상이면 "신뢰 가능한" 픽셀로 본다. */
+        private const val CONFIDENCE_THRESHOLD = 128
+
+        /** 고신뢰 샘플이 이 개수 미만이면 필터링 없이 전체 샘플을 대신 사용한다(값이 아예 없는 것보단 낫다). */
+        private const val MIN_HIGH_CONF_SAMPLE_COUNT = 5
+
+        /** 전체 샘플 중 고신뢰 비율이 이 값 미만이면 [DistanceMeasurement.lowConfidence]를 true로 표시한다. */
+        private const val MIN_HIGH_CONFIDENCE_RATIO = 0.4f
     }
 }

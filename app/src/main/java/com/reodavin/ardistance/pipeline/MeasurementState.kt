@@ -26,5 +26,7 @@ sealed class MeasurementState {
         val box2Lost: Boolean = false,
         /** 실측 거리(미터). depth 무효 프레임에서는 갱신되지 않고 이전 값을 유지한다 (계획 §6). */
         val distanceMeters: Float? = null,
+        /** true면 depth 신뢰도가 낮은 상태에서 계산된 값(장거리/저텍스처 등) — [distanceMeters]와 함께만 갱신된다. */
+        val distanceLowConfidence: Boolean = false,
     ) : MeasurementState()
 }

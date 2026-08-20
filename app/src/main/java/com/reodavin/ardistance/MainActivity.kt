@@ -38,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -202,15 +203,32 @@ class MainActivity : ComponentActivity() {
             // 화면 하단→박스)에 선과 함께 그린다 — 화면 정중앙 고정 표시는 제거 (TODO §3D 렌더링).
 
             if (measurementState !is MeasurementState.SelectingMode) {
-                Text(
-                    text = measurementState.guideText(),
-                    color = Color.White,
+                val lowConfidence = (measurementState as? MeasurementState.Tracking)?.distanceLowConfidence == true
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(24.dp)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .padding(8.dp),
-                )
+                        .padding(24.dp),
+                ) {
+                    if (lowConfidence) {
+                        Text(
+                            text = "⚠ 거리 신뢰도 낮음 (장거리/저텍스처 등)",
+                            color = Color.Red,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.6f))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                    Text(
+                        text = measurementState.guideText(),
+                        color = Color.White,
+                        modifier = Modifier
+                            .background(Color.Black.copy(alpha = 0.5f))
+                            .padding(8.dp),
+                    )
+                }
             }
 
             Button(
