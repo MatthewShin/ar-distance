@@ -14,19 +14,35 @@ import android.os.VibratorManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,6 +54,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -51,13 +68,16 @@ import com.google.ar.core.TrackingState
 import com.reodavin.ardistance.ar.ArRenderer
 import com.reodavin.ardistance.ar.ArSessionManager
 import com.reodavin.ardistance.ar.DepthSupport
-import com.reodavin.ardistance.pipeline.AccuracyMode
 import com.reodavin.ardistance.pipeline.FrameProcessor
 import com.reodavin.ardistance.pipeline.MeasurementMode
 import com.reodavin.ardistance.pipeline.MeasurementState
 import com.reodavin.ardistance.pipeline.PrecisionCaptureState
 import com.reodavin.ardistance.ui.BoxSelectionOverlay
 import com.reodavin.ardistance.ui.MeasurementViewModel
+import com.reodavin.ardistance.ui.theme.ArDistanceTheme
+import com.reodavin.ardistance.ui.theme.PrecisionColor
+import com.reodavin.ardistance.ui.theme.WarningColor
+import com.reodavin.ardistance.ui.theme.glassPanel
 
 class MainActivity : ComponentActivity() {
 
@@ -91,7 +111,7 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            MaterialTheme {
+            ArDistanceTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     if (cameraPermissionGranted) {
                         ArCameraScreen(status = statusText)
@@ -143,9 +163,6 @@ class MainActivity : ComponentActivity() {
             arRenderer?.setZoom(zoomFactor)
         }
 
-        // 고성능 모드(다중 시점 삼각측량) 여부 — 모드 선택 화면에서 고른 값을 selectMode에 그대로 전달한다.
-        var accuracyMode by remember { mutableStateOf(AccuracyMode.NORMAL) }
-
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
@@ -180,39 +197,20 @@ class MainActivity : ComponentActivity() {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .background(Color.Black.copy(alpha = 0.6f))
+                        .glassPanel()
                         .padding(24.dp),
                 ) {
                     Text("측정 모드를 선택하세요", color = Color.White, fontSize = 18.sp)
                     Spacer(modifier = Modifier.height(16.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable {
-                            accuracyMode = if (accuracyMode == AccuracyMode.HIGH_ACCURACY) {
-                                AccuracyMode.NORMAL
-                            } else {
-                                AccuracyMode.HIGH_ACCURACY
-                            }
-                        },
-                    ) {
-                        Checkbox(
-                            checked = accuracyMode == AccuracyMode.HIGH_ACCURACY,
-                            onCheckedChange = { checked ->
-                                accuracyMode = if (checked) AccuracyMode.HIGH_ACCURACY else AccuracyMode.NORMAL
-                            },
-                        )
-                        Text("고성능 모드 (정밀측정)", color = Color.White)
-                    }
-                    Spacer(modifier = Modifier.height(16.dp))
                     Button(onClick = {
-                        measurementViewModel.selectMode(MeasurementMode.ONE_TARGET, accuracyMode)
+                        measurementViewModel.selectMode(MeasurementMode.ONE_TARGET)
                         frameProcessor.setMode(MeasurementMode.ONE_TARGET)
                     }) {
                         Text("1타겟 모드 (카메라→사물 거리)")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(onClick = {
-                        measurementViewModel.selectMode(MeasurementMode.TWO_TARGET, accuracyMode)
+                        measurementViewModel.selectMode(MeasurementMode.TWO_TARGET)
                         frameProcessor.setMode(MeasurementMode.TWO_TARGET)
                     }) {
                         Text("2타겟 모드 (사물↔사물 거리)")
@@ -226,7 +224,7 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(16.dp)
-                    .background(Color.Black.copy(alpha = 0.5f))
+                    .glassPanel()
                     .padding(8.dp),
             )
 
@@ -241,22 +239,32 @@ class MainActivity : ComponentActivity() {
                         .align(Alignment.BottomCenter)
                         .padding(24.dp),
                 ) {
-                    if (lowConfidence) {
-                        Text(
-                            text = "⚠ 거리 신뢰도 낮음 (장거리/저텍스처 등)",
-                            color = Color.Red,
-                            fontWeight = FontWeight.Bold,
+                    AnimatedVisibility(
+                        visible = lowConfidence,
+                        enter = fadeIn() + scaleIn(),
+                        exit = fadeOut() + scaleOut(),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .background(Color.Black.copy(alpha = 0.6f))
+                                .glassPanel()
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
+                        ) {
+                            Icon(Icons.Filled.WarningAmber, contentDescription = null, tint = WarningColor)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "거리 신뢰도 낮음 (장거리/저텍스처 등)",
+                                color = WarningColor,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
                     }
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = measurementState.guideText(),
                         color = Color.White,
                         modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.5f))
+                            .glassPanel()
                             .padding(8.dp),
                     )
                 }
@@ -272,6 +280,8 @@ class MainActivity : ComponentActivity() {
                     .align(Alignment.TopEnd)
                     .padding(16.dp),
             ) {
+                Icon(Icons.Filled.RestartAlt, contentDescription = null, modifier = Modifier.width(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text("초기화")
             }
 
@@ -280,25 +290,25 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(start = 16.dp, bottom = 100.dp)
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .glassPanel()
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
-                Button(onClick = { zoomFactor = (zoomFactor - ZOOM_STEP).coerceAtLeast(MIN_ZOOM) }) {
-                    Text("－")
+                IconButton(onClick = { zoomFactor = (zoomFactor - ZOOM_STEP).coerceAtLeast(MIN_ZOOM) }) {
+                    Icon(Icons.Filled.Remove, contentDescription = "축소", tint = Color.White)
                 }
                 Text(
                     text = "%.1fx".format(zoomFactor),
                     color = Color.White,
-                    modifier = Modifier.padding(horizontal = 8.dp),
+                    modifier = Modifier.padding(horizontal = 4.dp),
                 )
-                Button(onClick = { zoomFactor = (zoomFactor + ZOOM_STEP).coerceAtMost(MAX_ZOOM) }) {
-                    Text("＋")
+                IconButton(onClick = { zoomFactor = (zoomFactor + ZOOM_STEP).coerceAtMost(MAX_ZOOM) }) {
+                    Icon(Icons.Filled.Add, contentDescription = "확대", tint = Color.White)
                 }
             }
 
-            // 고성능 모드(다중 시점 삼각측량) 스냅샷 정밀측정 UI — 일반 모드에서는 표시하지 않는다.
+            // 다중 시점 삼각측량 스냅샷 정밀측정 UI — 타겟이 추적 중이면 별도 모드 선택 없이 항상 노출.
             val trackingState = measurementState as? MeasurementState.Tracking
-            if (trackingState != null && trackingState.accuracyMode == AccuracyMode.HIGH_ACCURACY) {
+            if (trackingState != null) {
                 val targetsReady = if (trackingState.mode == MeasurementMode.ONE_TARGET) {
                     trackingState.box1 != null && !trackingState.box1Lost
                 } else {
@@ -311,64 +321,89 @@ class MainActivity : ComponentActivity() {
                         .align(Alignment.BottomEnd)
                         .padding(end = 16.dp, bottom = 100.dp),
                 ) {
-                    when (val capture = trackingState.precisionCapture) {
-                        is PrecisionCaptureState.Capturing -> {
-                            val progress = (capture.baselineMeters / capture.targetBaselineMeters * 100f).coerceAtMost(100f)
-                            Text(
-                                text = "폰을 옆으로 천천히 움직여주세요 (%.0f%%)".format(progress),
-                                color = Color.Yellow,
-                                modifier = Modifier
-                                    .background(Color.Black.copy(alpha = 0.6f))
-                                    .padding(8.dp),
-                            )
+                    AnimatedVisibility(
+                        visible = trackingState.precisionCapture != PrecisionCaptureState.Idle,
+                        enter = fadeIn() + scaleIn(),
+                        exit = fadeOut() + scaleOut(),
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.glassPanel().padding(8.dp),
+                        ) {
+                            when (val capture = trackingState.precisionCapture) {
+                                is PrecisionCaptureState.Capturing -> {
+                                    val progress =
+                                        (capture.baselineMeters / capture.targetBaselineMeters).coerceAtMost(1f)
+                                    Text(text = "폰을 옆으로 천천히 움직여주세요", color = Color.White)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    LinearProgressIndicator(
+                                        progress = { progress },
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                }
+                                is PrecisionCaptureState.Result -> {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = PrecisionColor)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "정밀측정: %.2f m".format(capture.distanceMeters),
+                                            color = PrecisionColor,
+                                            fontWeight = FontWeight.Bold,
+                                        )
+                                    }
+                                }
+                                is PrecisionCaptureState.Failed -> {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Filled.ErrorOutline, contentDescription = null, tint = WarningColor)
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(text = "정밀측정 실패: ${capture.reason}", color = WarningColor)
+                                    }
+                                }
+                                PrecisionCaptureState.Idle -> Unit
+                            }
                         }
-                        is PrecisionCaptureState.Result -> {
-                            Text(
-                                text = "정밀측정: %.2f m".format(capture.distanceMeters),
-                                color = Color.Green,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier
-                                    .background(Color.Black.copy(alpha = 0.6f))
-                                    .padding(8.dp),
-                            )
-                        }
-                        is PrecisionCaptureState.Failed -> {
-                            Text(
-                                text = "정밀측정 실패: ${capture.reason}",
-                                color = Color.Red,
-                                modifier = Modifier
-                                    .background(Color.Black.copy(alpha = 0.6f))
-                                    .padding(8.dp),
-                            )
-                        }
-                        PrecisionCaptureState.Idle -> Unit
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Button(
                         onClick = { frameProcessor.startPrecisionCapture() },
                         enabled = targetsReady && trackingState.precisionCapture !is PrecisionCaptureState.Capturing,
                     ) {
+                        Icon(Icons.Filled.CenterFocusStrong, contentDescription = null, modifier = Modifier.width(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text("정밀 측정")
                     }
                 }
             }
 
-            if (isProximityWarning) {
-                Box(
+            AnimatedVisibility(
+                visible = isProximityWarning,
+                modifier = Modifier.fillMaxSize(),
+                enter = fadeIn(),
+                exit = fadeOut(),
+            ) {
+                Box(modifier = Modifier.fillMaxSize().border(width = 12.dp, color = Color.Red))
+            }
+            AnimatedVisibility(
+                visible = isProximityWarning,
+                modifier = Modifier.align(Alignment.TopCenter).padding(16.dp),
+                enter = fadeIn() + scaleIn(),
+                exit = fadeOut() + scaleOut(),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
-                        .fillMaxSize()
-                        .border(width = 12.dp, color = Color.Red),
-                )
-                Text(
-                    text = "근접 경고: %.2f m".format(distanceMeters),
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(16.dp)
-                        .background(Color.Red.copy(alpha = 0.8f))
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.Red.copy(alpha = 0.85f))
                         .padding(horizontal = 16.dp, vertical = 8.dp),
-                )
+                ) {
+                    Icon(Icons.Filled.WarningAmber, contentDescription = null, tint = Color.White)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "근접 경고: %.2f m".format(distanceMeters),
+                        color = Color.White,
+                        fontSize = 18.sp,
+                    )
+                }
             }
         }
     }

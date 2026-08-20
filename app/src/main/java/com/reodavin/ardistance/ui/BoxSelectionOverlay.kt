@@ -26,12 +26,15 @@ import androidx.compose.ui.unit.sp
 import com.reodavin.ardistance.pipeline.MeasurementMode
 import com.reodavin.ardistance.pipeline.MeasurementState
 import com.reodavin.ardistance.pipeline.PixelRect
+import com.reodavin.ardistance.ui.theme.Box1Color
+import com.reodavin.ardistance.ui.theme.Box2Color
+import com.reodavin.ardistance.ui.theme.DistanceLineColor
 
 private const val MIN_BOX_SIZE_PX = 20f
 private const val TAP_BOX_RADIUS_PX = 70f
-private val BOX1_COLOR = Color(0xFFFF5252) // 빨강
-private val BOX2_COLOR = Color(0xFF448AFF) // 파랑
-private val DISTANCE_LINE_COLOR = Color(0xFFFFEB3B) // 노랑
+private val BOX1_COLOR = Box1Color
+private val BOX2_COLOR = Box2Color
+private val DISTANCE_LINE_COLOR = DistanceLineColor
 
 /**
  * 드래그(또는 탭)로 박스1 → 박스2를 순서대로 지정하는 오버레이 (계획 §3).
