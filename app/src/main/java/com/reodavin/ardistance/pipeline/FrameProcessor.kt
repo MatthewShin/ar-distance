@@ -1,13 +1,16 @@
 package com.reodavin.ardistance.pipeline
 
 import android.media.Image
+import android.os.SystemClock
 import android.util.Log
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
+import com.google.ar.core.Pose
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
 import com.reodavin.ardistance.geometry.DistanceCalculator
 import com.reodavin.ardistance.geometry.PoseTransform
+import com.reodavin.ardistance.geometry.RayTriangulator
 import com.reodavin.ardistance.geometry.Unprojector
 import com.reodavin.ardistance.tracking.BoxTracker
 import com.reodavin.ardistance.tracking.OpenCvLoader
@@ -15,6 +18,7 @@ import com.reodavin.ardistance.tracking.TrackerFactory
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect as CvRect
@@ -52,17 +56,25 @@ private data class DistanceMeasurement(val meters: Float, val lowConfidence: Boo
  */
 class FrameProcessor(
     private val onResult: (FrameResult) -> Unit,
+    private val onPrecisionUpdate: (PrecisionCaptureState) -> Unit = {},
 ) {
     private sealed class Command {
         data class Init(val index: Int, val viewRect: PixelRect) : Command()
         data class SetMode(val mode: MeasurementMode) : Command()
         data object Reset : Command()
+        data object StartCapture : Command()
+    }
+
+    /** 고성능 모드(다중 시점 삼각측량) 스냅샷 정밀측정 진행 중 상태 — [process]에서만 접근한다. */
+    private class CaptureSession(val startedAtMs: Long) {
+        val raysByBox = arrayOf(mutableListOf<RayTriangulator.Ray>(), mutableListOf<RayTriangulator.Ray>())
     }
 
     private val commandQueue = ConcurrentLinkedQueue<Command>()
     private val trackers = arrayOfNulls<BoxTracker>(2)
     private val distanceCalculator = DistanceCalculator()
     private var mode = MeasurementMode.TWO_TARGET
+    private var captureSession: CaptureSession? = null
 
     fun requestInit(index: Int, viewRect: PixelRect) {
         commandQueue.add(Command.Init(index, viewRect))
@@ -74,6 +86,11 @@ class FrameProcessor(
 
     fun resetAll() {
         commandQueue.add(Command.Reset)
+    }
+
+    /** 고성능 모드 스냅샷 정밀측정을 시작한다 — 이후 몇 프레임에 걸쳐 관측치를 모아 자동 확정된다. */
+    fun startPrecisionCapture() {
+        commandQueue.add(Command.StartCapture)
     }
 
     fun process(frame: Frame) {
@@ -115,6 +132,7 @@ class FrameProcessor(
                         trackers[0] = null
                         trackers[1] = null
                         distanceCalculator.reset()
+                        captureSession = null
                     }
                     is Command.SetMode -> {
                         mode = command.mode
@@ -125,6 +143,9 @@ class FrameProcessor(
                         tracker.init(gray, imageRect)
                         trackers[command.index]?.release()
                         trackers[command.index] = tracker
+                    }
+                    is Command.StartCapture -> {
+                        captureSession = CaptureSession(startedAtMs = SystemClock.elapsedRealtime())
                     }
                 }
             }
@@ -156,6 +177,10 @@ class FrameProcessor(
                     rect1 = imageRects[0],
                     rect2 = imageRects[1],
                 )
+            }
+
+            captureSession?.let { session ->
+                updatePrecisionCapture(session, frame, imageRects, trackedBoxes)
             }
 
             onResult(
@@ -230,6 +255,88 @@ class FrameProcessor(
             depthImage.close()
             confidenceImage.close()
         }
+    }
+
+    /**
+     * 고성능 모드(다중 시점 삼각측량) 진행 중 매 프레임 호출된다 — depth 센서 없이, 이번 프레임의
+     * 타겟 픽셀 위치 + 카메라 pose만으로 광선을 하나 추가하고, 충분히 모였으면(baseline 도달 또는
+     * 타임아웃) [finalizeCapture]로 확정한다. 타겟을 이번 프레임에 놓쳤으면 세션을 즉시 실패 처리한다.
+     */
+    private fun updatePrecisionCapture(
+        session: CaptureSession,
+        frame: Frame,
+        imageRects: Array<PixelRect?>,
+        trackedBoxes: Array<TrackedBox?>,
+    ) {
+        val relevantIndices = if (mode == MeasurementMode.ONE_TARGET) intArrayOf(0) else intArrayOf(0, 1)
+
+        val lost = relevantIndices.any { index -> trackedBoxes[index]?.isLost != false || imageRects[index] == null }
+        if (lost) {
+            captureSession = null
+            onPrecisionUpdate(PrecisionCaptureState.Failed("타겟을 놓쳤습니다"))
+            return
+        }
+
+        val intr = imageIntrinsicsOf(frame)
+        val pose = frame.camera.pose
+        val origin = pose.translation
+        for (index in relevantIndices) {
+            val rect = imageRects[index]!!
+            // depth=1f는 방향벡터만 얻기 위한 임의 값 — RayTriangulator가 정규화하므로 크기는 무관하다.
+            val localDir = Unprojector.unproject(rect.centerX, rect.centerY, 1f, intr)
+            val worldDir = pose.rotateVector(localDir)
+            session.raysByBox[index].add(RayTriangulator.Ray(origin = origin.copyOf(), direction = worldDir))
+        }
+
+        val baseline = maxPairwiseDistance(session.raysByBox[relevantIndices[0]].map { it.origin })
+        val elapsed = SystemClock.elapsedRealtime() - session.startedAtMs
+
+        if (baseline >= PRECISION_TARGET_BASELINE_METERS || elapsed >= PRECISION_MAX_DURATION_MS) {
+            finalizeCapture(session, relevantIndices, pose)
+        } else {
+            onPrecisionUpdate(PrecisionCaptureState.Capturing(baseline, PRECISION_TARGET_BASELINE_METERS))
+        }
+    }
+
+    /** 모아진 광선들로 각 타겟의 world 3D 점을 삼각측량하고, 최종 거리를 확정해 결과를 통지한다. */
+    private fun finalizeCapture(session: CaptureSession, relevantIndices: IntArray, endPose: Pose) {
+        captureSession = null
+
+        val worldPoints = arrayOfNulls<FloatArray>(2)
+        for (index in relevantIndices) {
+            val point = RayTriangulator.triangulate(session.raysByBox[index])
+            if (point == null) {
+                onPrecisionUpdate(PrecisionCaptureState.Failed("폰을 더 크게 움직여주세요"))
+                return
+            }
+            worldPoints[index] = point
+        }
+
+        val distanceMeters = if (mode == MeasurementMode.ONE_TARGET) {
+            // 카메라는 삼각측량 도중 계속 움직이므로, 종료 시점 카메라 위치를 기준으로 계산한다.
+            distanceBetween(worldPoints[0]!!, endPose.translation)
+        } else {
+            distanceBetween(worldPoints[0]!!, worldPoints[1]!!)
+        }
+        onPrecisionUpdate(PrecisionCaptureState.Result(distanceMeters))
+    }
+
+    private fun distanceBetween(a: FloatArray, b: FloatArray): Float {
+        val dx = a[0] - b[0]
+        val dy = a[1] - b[1]
+        val dz = a[2] - b[2]
+        return sqrt(dx * dx + dy * dy + dz * dz)
+    }
+
+    private fun maxPairwiseDistance(points: List<FloatArray>): Float {
+        var maxDist = 0f
+        for (i in points.indices) {
+            for (j in i + 1 until points.size) {
+                val d = distanceBetween(points[i], points[j])
+                if (d > maxDist) maxDist = d
+            }
+        }
+        return maxDist
     }
 
     /**
@@ -406,5 +513,11 @@ class FrameProcessor(
 
         /** 전체 샘플 중 고신뢰 비율이 이 값 미만이면 [DistanceMeasurement.lowConfidence]를 true로 표시한다. */
         private const val MIN_HIGH_CONFIDENCE_RATIO = 0.4f
+
+        /** 고성능 모드: 이 baseline(카메라 이동 거리, 미터)에 도달하면 정밀측정을 자동 확정한다. */
+        private const val PRECISION_TARGET_BASELINE_METERS = 0.15f
+
+        /** 고성능 모드: baseline에 못 미쳐도 이 시간이 지나면 그때까지 모은 관측치로 확정을 시도한다. */
+        private const val PRECISION_MAX_DURATION_MS = 4000L
     }
 }

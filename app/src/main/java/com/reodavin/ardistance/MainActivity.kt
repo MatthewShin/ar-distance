@@ -16,6 +16,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -49,9 +51,11 @@ import com.google.ar.core.TrackingState
 import com.reodavin.ardistance.ar.ArRenderer
 import com.reodavin.ardistance.ar.ArSessionManager
 import com.reodavin.ardistance.ar.DepthSupport
+import com.reodavin.ardistance.pipeline.AccuracyMode
 import com.reodavin.ardistance.pipeline.FrameProcessor
 import com.reodavin.ardistance.pipeline.MeasurementMode
 import com.reodavin.ardistance.pipeline.MeasurementState
+import com.reodavin.ardistance.pipeline.PrecisionCaptureState
 import com.reodavin.ardistance.ui.BoxSelectionOverlay
 import com.reodavin.ardistance.ui.MeasurementViewModel
 
@@ -108,9 +112,14 @@ class MainActivity : ComponentActivity() {
         val measurementState by measurementViewModel.state.collectAsState()
 
         val frameProcessor = remember {
-            FrameProcessor { result ->
-                mainHandler.post { measurementViewModel.updateFrameResult(result) }
-            }
+            FrameProcessor(
+                onResult = { result ->
+                    mainHandler.post { measurementViewModel.updateFrameResult(result) }
+                },
+                onPrecisionUpdate = { captureState ->
+                    mainHandler.post { measurementViewModel.updatePrecisionCapture(captureState) }
+                },
+            )
         }
 
         val context = LocalContext.current
@@ -133,6 +142,9 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(zoomFactor) {
             arRenderer?.setZoom(zoomFactor)
         }
+
+        // 고성능 모드(다중 시점 삼각측량) 여부 — 모드 선택 화면에서 고른 값을 selectMode에 그대로 전달한다.
+        var accuracyMode by remember { mutableStateOf(AccuracyMode.NORMAL) }
 
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
@@ -173,15 +185,34 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Text("측정 모드를 선택하세요", color = Color.White, fontSize = 18.sp)
                     Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable {
+                            accuracyMode = if (accuracyMode == AccuracyMode.HIGH_ACCURACY) {
+                                AccuracyMode.NORMAL
+                            } else {
+                                AccuracyMode.HIGH_ACCURACY
+                            }
+                        },
+                    ) {
+                        Checkbox(
+                            checked = accuracyMode == AccuracyMode.HIGH_ACCURACY,
+                            onCheckedChange = { checked ->
+                                accuracyMode = if (checked) AccuracyMode.HIGH_ACCURACY else AccuracyMode.NORMAL
+                            },
+                        )
+                        Text("고성능 모드 (정밀측정)", color = Color.White)
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
                     Button(onClick = {
-                        measurementViewModel.selectMode(MeasurementMode.ONE_TARGET)
+                        measurementViewModel.selectMode(MeasurementMode.ONE_TARGET, accuracyMode)
                         frameProcessor.setMode(MeasurementMode.ONE_TARGET)
                     }) {
                         Text("1타겟 모드 (카메라→사물 거리)")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(onClick = {
-                        measurementViewModel.selectMode(MeasurementMode.TWO_TARGET)
+                        measurementViewModel.selectMode(MeasurementMode.TWO_TARGET, accuracyMode)
                         frameProcessor.setMode(MeasurementMode.TWO_TARGET)
                     }) {
                         Text("2타겟 모드 (사물↔사물 거리)")
@@ -262,6 +293,63 @@ class MainActivity : ComponentActivity() {
                 )
                 Button(onClick = { zoomFactor = (zoomFactor + ZOOM_STEP).coerceAtMost(MAX_ZOOM) }) {
                     Text("＋")
+                }
+            }
+
+            // 고성능 모드(다중 시점 삼각측량) 스냅샷 정밀측정 UI — 일반 모드에서는 표시하지 않는다.
+            val trackingState = measurementState as? MeasurementState.Tracking
+            if (trackingState != null && trackingState.accuracyMode == AccuracyMode.HIGH_ACCURACY) {
+                val targetsReady = if (trackingState.mode == MeasurementMode.ONE_TARGET) {
+                    trackingState.box1 != null && !trackingState.box1Lost
+                } else {
+                    trackingState.box1 != null && !trackingState.box1Lost &&
+                        trackingState.box2 != null && !trackingState.box2Lost
+                }
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 16.dp, bottom = 100.dp),
+                ) {
+                    when (val capture = trackingState.precisionCapture) {
+                        is PrecisionCaptureState.Capturing -> {
+                            val progress = (capture.baselineMeters / capture.targetBaselineMeters * 100f).coerceAtMost(100f)
+                            Text(
+                                text = "폰을 옆으로 천천히 움직여주세요 (%.0f%%)".format(progress),
+                                color = Color.Yellow,
+                                modifier = Modifier
+                                    .background(Color.Black.copy(alpha = 0.6f))
+                                    .padding(8.dp),
+                            )
+                        }
+                        is PrecisionCaptureState.Result -> {
+                            Text(
+                                text = "정밀측정: %.2f m".format(capture.distanceMeters),
+                                color = Color.Green,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .background(Color.Black.copy(alpha = 0.6f))
+                                    .padding(8.dp),
+                            )
+                        }
+                        is PrecisionCaptureState.Failed -> {
+                            Text(
+                                text = "정밀측정 실패: ${capture.reason}",
+                                color = Color.Red,
+                                modifier = Modifier
+                                    .background(Color.Black.copy(alpha = 0.6f))
+                                    .padding(8.dp),
+                            )
+                        }
+                        PrecisionCaptureState.Idle -> Unit
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Button(
+                        onClick = { frameProcessor.startPrecisionCapture() },
+                        enabled = targetsReady && trackingState.precisionCapture !is PrecisionCaptureState.Capturing,
+                    ) {
+                        Text("정밀 측정")
+                    }
                 }
             }
 
