@@ -33,12 +33,18 @@ private val DISTANCE_LINE_COLOR = Color(0xFFFFEB3B) // 노랑
  * 드래그로 박스1 → 박스2를 순서대로 지정하는 오버레이 (계획 §3).
  * [MeasurementState.Tracking] 상태에서는 [FrameProcessor]가 갱신하는 박스 위치를 그대로 그리고
  * 추가 드래그는 무시한다 (재지정은 초기화 버튼으로만 가능).
+ *
+ * [zoomFactor]는 [com.reodavin.ardistance.ar.CameraBackgroundRenderer]가 그리는 디지털 줌 배율과
+ * 동일한 값을 받는다(1.0 = 줌 없음). 줌은 화면 표시/터치 좌표 해석에만 관여하고
+ * [FrameProcessor]의 트래킹/거리 계산은 항상 줌 없는 논리 좌표계로 동작하므로, 이 오버레이가
+ * 화면(줌 적용) 좌표 ↔ 논리(줌 없음) 좌표를 양방향으로 변환해준다.
  */
 @Composable
 fun BoxSelectionOverlay(
     state: MeasurementState,
     onBoxConfirmed: (PixelRect) -> Unit,
     modifier: Modifier = Modifier,
+    zoomFactor: Float = 1f,
 ) {
     var dragStart by remember { mutableStateOf<Offset?>(null) }
     var dragCurrent by remember { mutableStateOf<Offset?>(null) }
@@ -48,8 +54,9 @@ fun BoxSelectionOverlay(
     Canvas(
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(canDraw) {
+            .pointerInput(canDraw, zoomFactor) {
                 if (!canDraw) return@pointerInput
+                val center = Offset(size.width / 2f, size.height / 2f)
                 detectDragGestures(
                     onDragStart = { offset ->
                         dragStart = offset
@@ -59,9 +66,11 @@ fun BoxSelectionOverlay(
                         dragCurrent = change.position
                     },
                     onDragEnd = {
-                        val rect = boundingRect(dragStart, dragCurrent)
-                        if (rect != null && rect.width >= MIN_BOX_SIZE_PX && rect.height >= MIN_BOX_SIZE_PX) {
-                            onBoxConfirmed(rect)
+                        // 화면(터치, 줌 적용) 좌표의 드래그 크기 기준으로 최소 크기를 판단하고,
+                        // 실제 트래커 init에는 논리(줌 없음) 좌표로 변환해 넘긴다.
+                        val screenRect = boundingRect(dragStart, dragCurrent)
+                        if (screenRect != null && screenRect.width >= MIN_BOX_SIZE_PX && screenRect.height >= MIN_BOX_SIZE_PX) {
+                            onBoxConfirmed(screenRect.zoomedOut(center, zoomFactor))
                         }
                         dragStart = null
                         dragCurrent = null
@@ -73,17 +82,22 @@ fun BoxSelectionOverlay(
                 )
             },
     ) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+
         when (state) {
             is MeasurementState.SelectingMode -> Unit
             is MeasurementState.SelectingBox1 -> Unit
-            is MeasurementState.SelectingBox2 -> drawBoxOutline(state.box1, BOX1_COLOR, dimmed = false)
+            is MeasurementState.SelectingBox2 -> {
+                drawBoxOutline(state.box1.zoomedIn(center, zoomFactor), BOX1_COLOR, dimmed = false)
+            }
             is MeasurementState.Tracking -> {
-                state.box1?.let { drawBoxOutline(it, BOX1_COLOR, dimmed = state.box1Lost) }
-                state.box2?.let { drawBoxOutline(it, BOX2_COLOR, dimmed = state.box2Lost) }
-                drawTrackedDistance(textMeasurer, state)
+                state.box1?.let { drawBoxOutline(it.zoomedIn(center, zoomFactor), BOX1_COLOR, dimmed = state.box1Lost) }
+                state.box2?.let { drawBoxOutline(it.zoomedIn(center, zoomFactor), BOX2_COLOR, dimmed = state.box2Lost) }
+                drawTrackedDistance(textMeasurer, state, zoomFactor)
             }
         }
 
+        // 드래그 미리보기는 사용자가 지금 화면에서 보는 그대로 그리므로 줌 변환이 필요 없다.
         if (canDraw) {
             boundingRect(dragStart, dragCurrent)?.let { preview ->
                 val previewColor = if (state is MeasurementState.SelectingBox1) BOX1_COLOR else BOX2_COLOR
@@ -103,6 +117,26 @@ private fun boundingRect(start: Offset?, end: Offset?): PixelRect? {
     )
 }
 
+/** 화면(줌 적용) 좌표 → 논리(줌 없음) VIEW 좌표. 박스 드래그 확정 시 사용. */
+private fun PixelRect.zoomedOut(center: Offset, zoom: Float): PixelRect {
+    return PixelRect(
+        left = center.x + (left - center.x) / zoom,
+        top = center.y + (top - center.y) / zoom,
+        right = center.x + (right - center.x) / zoom,
+        bottom = center.y + (bottom - center.y) / zoom,
+    )
+}
+
+/** 논리(줌 없음) VIEW 좌표 → 화면(줌 적용) 좌표. 트래킹 결과를 그릴 때 사용. */
+private fun PixelRect.zoomedIn(center: Offset, zoom: Float): PixelRect {
+    return PixelRect(
+        left = center.x + (left - center.x) * zoom,
+        top = center.y + (top - center.y) * zoom,
+        right = center.x + (right - center.x) * zoom,
+        bottom = center.y + (bottom - center.y) * zoom,
+    )
+}
+
 private fun DrawScope.drawBoxOutline(rect: PixelRect, color: Color, dimmed: Boolean, alpha: Float = 1f) {
     drawRect(
         color = color.copy(alpha = if (dimmed) 0.3f else alpha),
@@ -119,19 +153,24 @@ private fun DrawScope.drawBoxOutline(rect: PixelRect, color: Color, dimmed: Bool
  * 움직여 "사물에 붙어있는 자"처럼 보인다. 완전한 3D OpenGL 렌더링(ARCore 앵커+빌보드 텍스트)
  * 대신 이미 추적 중인 화면 좌표를 그대로 활용하는 경량 방식이다.
  */
-private fun DrawScope.drawTrackedDistance(textMeasurer: TextMeasurer, state: MeasurementState.Tracking) {
+private fun DrawScope.drawTrackedDistance(textMeasurer: TextMeasurer, state: MeasurementState.Tracking, zoomFactor: Float) {
     val box1 = state.box1 ?: return
+    val center = Offset(size.width / 2f, size.height / 2f)
+    val box1Screen = box1.zoomedIn(center, zoomFactor)
+
     val start: Offset
     val end: Offset
     when (state.mode) {
         MeasurementMode.TWO_TARGET -> {
             val box2 = state.box2 ?: return
-            start = Offset(box1.centerX, box1.centerY)
-            end = Offset(box2.centerX, box2.centerY)
+            val box2Screen = box2.zoomedIn(center, zoomFactor)
+            start = Offset(box1Screen.centerX, box1Screen.centerY)
+            end = Offset(box2Screen.centerX, box2Screen.centerY)
         }
         MeasurementMode.ONE_TARGET -> {
-            start = Offset(size.width / 2f, size.height) // 화면 하단 중앙 = 카메라(사용자) 위치
-            end = Offset(box1.centerX, box1.centerY)
+            // 화면 하단 중앙 = 카메라(사용자) 위치. 화면 자체의 고정 지점이므로 줌 변환 불필요.
+            start = Offset(size.width / 2f, size.height)
+            end = Offset(box1Screen.centerX, box1Screen.centerY)
         }
     }
 

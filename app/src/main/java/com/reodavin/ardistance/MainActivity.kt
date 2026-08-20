@@ -18,6 +18,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -57,6 +58,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var arSessionManager: ArSessionManager
     private var glSurfaceView: GLSurfaceView? = null
+    private var arRenderer: ArRenderer? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var cameraPermissionGranted by mutableStateOf(false)
@@ -124,17 +126,24 @@ class MainActivity : ComponentActivity() {
             wasWarning = isProximityWarning
         }
 
+        // 디지털 줌: 카메라 배경 렌더링과 터치 좌표 해석에만 관여 — 거리 계산 파이프라인은
+        // 이 값을 전혀 모른다 (TODO §디지털 줌 기능, /Users/reodavin/.claude/plans/1-calm-thimble.md 참고).
+        var zoomFactor by remember { mutableStateOf(1f) }
+        LaunchedEffect(zoomFactor) {
+            arRenderer?.setZoom(zoomFactor)
+        }
+
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { glContext ->
                     GLSurfaceView(glContext).apply {
                         setEGLContextClientVersion(2)
-                        setRenderer(
-                            ArRenderer(arSessionManager, frameProcessor) { frameStatus ->
-                                mainHandler.post { statusText = frameStatus.toDisplayText() }
-                            }
-                        )
+                        val renderer = ArRenderer(arSessionManager, frameProcessor) { frameStatus ->
+                            mainHandler.post { statusText = frameStatus.toDisplayText() }
+                        }
+                        arRenderer = renderer
+                        setRenderer(renderer)
                         renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
                         glSurfaceView = this
                     }
@@ -150,6 +159,7 @@ class MainActivity : ComponentActivity() {
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
+                zoomFactor = zoomFactor,
             )
 
             if (measurementState is MeasurementState.SelectingMode) {
@@ -207,12 +217,34 @@ class MainActivity : ComponentActivity() {
                 onClick = {
                     measurementViewModel.reset()
                     frameProcessor.resetAll()
+                    zoomFactor = 1f
                 },
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(16.dp),
             ) {
                 Text("초기화")
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 16.dp, bottom = 100.dp)
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Button(onClick = { zoomFactor = (zoomFactor - ZOOM_STEP).coerceAtLeast(MIN_ZOOM) }) {
+                    Text("－")
+                }
+                Text(
+                    text = "%.1fx".format(zoomFactor),
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
+                Button(onClick = { zoomFactor = (zoomFactor + ZOOM_STEP).coerceAtMost(MAX_ZOOM) }) {
+                    Text("＋")
+                }
             }
 
             if (isProximityWarning) {
@@ -263,6 +295,11 @@ class MainActivity : ComponentActivity() {
 
 /** 거리가 이 값(미터) 미만이면 근접 경고를 표시한다. TODO: 사용자가 조절 가능하게 만들 수 있음. */
 private const val PROXIMITY_WARNING_METERS = 0.3f
+
+/** 디지털 줌 배율 범위/단위. CameraBackgroundRenderer.setZoom()의 클램프 범위(1f~4f)와 맞춘다. */
+private const val MIN_ZOOM = 1f
+private const val MAX_ZOOM = 4f
+private const val ZOOM_STEP = 0.5f
 
 private fun Context.getVibratorCompat(): Vibrator {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

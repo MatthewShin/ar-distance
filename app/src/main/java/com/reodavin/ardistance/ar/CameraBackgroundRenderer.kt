@@ -33,12 +33,25 @@ class CameraBackgroundRenderer {
         +1f, +1f,
     )
 
-    private var quadTexCoords: FloatBuffer = floatBufferOf(
+    /** ARCore가 계산한, 줌 미적용 원본 텍스처 좌표 (화면 회전/크롭 반영, 화면 지오메트리 변경 시에만 갱신). */
+    private var baseTexCoords: FloatBuffer = floatBufferOf(
         0f, 0f,
         0f, 1f,
         1f, 0f,
         1f, 1f,
     )
+
+    /** 실제 렌더링에 쓰이는 텍스처 좌표 — [baseTexCoords]에 [zoomFactor]를 적용한 결과, 매 프레임 갱신. */
+    private var quadTexCoords: FloatBuffer = baseTexCoords
+
+    /** 1.0 = 줌 없음. GL 스레드([updateTexCoords])와 UI 스레드([setZoom]) 양쪽에서 접근하므로 volatile. */
+    @Volatile
+    private var zoomFactor: Float = 1f
+
+    /** UI 스레드에서 호출 — 다음 프레임([updateTexCoords])에 반영된다. */
+    fun setZoom(factor: Float) {
+        zoomFactor = factor.coerceIn(1f, 4f)
+    }
 
     fun createOnGlThread() {
         val textures = IntArray(1)
@@ -63,7 +76,13 @@ class CameraBackgroundRenderer {
         textureUniform = GLES20.glGetUniformLocation(program, "sTexture")
     }
 
-    /** 매 프레임 화면 회전/크롭에 맞는 텍스처 좌표를 다시 계산한다. */
+    /**
+     * 매 프레임 화면 회전/크롭에 맞는 텍스처 좌표(base)를 필요할 때만 다시 계산하고,
+     * 여기에 [zoomFactor]를 적용한 좌표로 [quadTexCoords]를 매 프레임 갱신한다.
+     * 줌은 물리 카메라와 무관한 순수 디지털 크롭이라, 화면에 보이는 범위만 좁혀질 뿐
+     * ARCore의 depth/추적 파이프라인([com.reodavin.ardistance.pipeline.FrameProcessor])에는
+     * 아무 영향이 없다 — 좌표 변환은 UI 레이어([com.reodavin.ardistance.ui.BoxSelectionOverlay])에서만 처리한다.
+     */
     fun updateTexCoords(frame: Frame) {
         if (frame.hasDisplayGeometryChanged()) {
             val transformed = floatBufferOf(0f, 0f, 0f, 0f, 0f, 0f, 0f, 0f)
@@ -73,8 +92,34 @@ class CameraBackgroundRenderer {
                 Coordinates2d.TEXTURE_NORMALIZED,
                 transformed,
             )
-            quadTexCoords = transformed
+            baseTexCoords = transformed
         }
+        quadTexCoords = applyZoom(baseTexCoords, zoomFactor)
+    }
+
+    /** [base]의 4개 텍스처 좌표를 그 중심 기준으로 1/zoom만큼 크롭해 확대 효과를 낸다. */
+    private fun applyZoom(base: FloatBuffer, zoom: Float): FloatBuffer {
+        if (zoom <= 1f) return base
+
+        val values = FloatArray(8)
+        base.position(0)
+        base.get(values)
+        base.position(0)
+
+        var centerX = 0f
+        var centerY = 0f
+        for (i in 0 until 4) {
+            centerX += values[i * 2]
+            centerY += values[i * 2 + 1]
+        }
+        centerX /= 4f
+        centerY /= 4f
+
+        for (i in 0 until 4) {
+            values[i * 2] = centerX + (values[i * 2] - centerX) / zoom
+            values[i * 2 + 1] = centerY + (values[i * 2 + 1] - centerY) / zoom
+        }
+        return floatBufferOf(*values)
     }
 
     fun draw() {

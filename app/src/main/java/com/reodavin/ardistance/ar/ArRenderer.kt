@@ -25,6 +25,11 @@ class ArRenderer(
     private var viewportWidth = 0
     private var viewportHeight = 0
 
+    /** UI 스레드에서 호출 — [CameraBackgroundRenderer.setZoom]으로 그대로 위임한다. */
+    fun setZoom(factor: Float) {
+        backgroundRenderer.setZoom(factor)
+    }
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         backgroundRenderer.createOnGlThread()
