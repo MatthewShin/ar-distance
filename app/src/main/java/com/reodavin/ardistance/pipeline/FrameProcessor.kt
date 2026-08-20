@@ -172,8 +172,8 @@ class FrameProcessor(
 
         return try {
             val intr = imageIntrinsicsOf(frame)
-            val depth1 = sampleDepthMeters(depthImage, rect1.centerX, rect1.centerY, cameraImageWidth, cameraImageHeight)
-            val depth2 = sampleDepthMeters(depthImage, rect2.centerX, rect2.centerY, cameraImageWidth, cameraImageHeight)
+            val depth1 = sampleDepthMeters(depthImage, rect1, cameraImageWidth, cameraImageHeight)
+            val depth2 = sampleDepthMeters(depthImage, rect2, cameraImageWidth, cameraImageHeight)
             if (depth1 == null || depth2 == null) return null
 
             val camPoint1 = Unprojector.unproject(rect1.centerX, rect1.centerY, depth1, intr)
@@ -208,7 +208,7 @@ class FrameProcessor(
 
         return try {
             val intr = imageIntrinsicsOf(frame)
-            val depth1 = sampleDepthMeters(depthImage, rect1.centerX, rect1.centerY, cameraImageWidth, cameraImageHeight)
+            val depth1 = sampleDepthMeters(depthImage, rect1, cameraImageWidth, cameraImageHeight)
                 ?: return null
             val camPoint1 = Unprojector.unproject(rect1.centerX, rect1.centerY, depth1, intr)
             distanceCalculator.update(camPoint1, CAMERA_ORIGIN)
@@ -226,33 +226,40 @@ class FrameProcessor(
 
     /**
      * depth 이미지는 카메라 이미지보다 해상도가 낮은 경우가 많아 좌표를 비율로 스케일링한다 (계획 §4.5).
-     * 중심 픽셀 1개만 읽으면 depth 센서 노이즈에 취약해, 3x3 이웃의 유효값(0 초과)들 중
-     * 중앙값(median)을 사용한다 (TODO §depth 노이즈 완화 — 이상치에 강하고 계산이 단순함).
+     *
+     * 중심 픽셀 근처 몇 개만 보면 depth 센서 노이즈나 엣지/반사 등으로 인한 튀는 값에 취약하다.
+     * 대신 박스 내부(가장자리는 배경이 섞일 수 있어 [INSET_RATIO]만큼 안쪽으로 줄인 영역)에
+     * [GRID_SIZE] x [GRID_SIZE] 격자로 다중 포인트를 샘플링하고, 정렬 후 상하위 [TRIM_RATIO]를
+     * 잘라낸(trimmed) 나머지의 중앙값을 대표값으로 쓴다 — "여러 보조 지점을 찍어서 서로 비교해
+     * 이상치를 걸러내는" 방식으로, 단일 지점보다 훨씬 강건하다.
      */
     private fun sampleDepthMeters(
         depthImage: Image,
-        u: Float,
-        v: Float,
+        rect: PixelRect,
         cameraImageWidth: Int,
         cameraImageHeight: Int,
     ): Float? {
         val depthWidth = depthImage.width
         val depthHeight = depthImage.height
-        val centerX = ((u / cameraImageWidth) * depthWidth).toInt().coerceIn(0, depthWidth - 1)
-        val centerY = ((v / cameraImageHeight) * depthHeight).toInt().coerceIn(0, depthHeight - 1)
-
         val plane = depthImage.planes[0]
         val buffer = plane.buffer
         val rowStride = plane.rowStride
         val pixelStride = plane.pixelStride
         val limit = buffer.limit()
 
+        val insetLeft = rect.left + rect.width * INSET_RATIO
+        val insetTop = rect.top + rect.height * INSET_RATIO
+        val insetWidth = rect.width * (1f - 2 * INSET_RATIO)
+        val insetHeight = rect.height * (1f - 2 * INSET_RATIO)
+
         val samplesMm = mutableListOf<Int>()
-        for (dy in -1..1) {
-            for (dx in -1..1) {
-                val x = (centerX + dx).coerceIn(0, depthWidth - 1)
-                val y = (centerY + dy).coerceIn(0, depthHeight - 1)
-                val byteIndex = y * rowStride + x * pixelStride
+        for (gy in 0 until GRID_SIZE) {
+            for (gx in 0 until GRID_SIZE) {
+                val u = insetLeft + insetWidth * (gx + 0.5f) / GRID_SIZE
+                val v = insetTop + insetHeight * (gy + 0.5f) / GRID_SIZE
+                val depthX = ((u / cameraImageWidth) * depthWidth).toInt().coerceIn(0, depthWidth - 1)
+                val depthY = ((v / cameraImageHeight) * depthHeight).toInt().coerceIn(0, depthHeight - 1)
+                val byteIndex = depthY * rowStride + depthX * pixelStride
                 if (byteIndex < 0 || byteIndex + 1 >= limit) continue
 
                 val low = buffer.get(byteIndex).toInt() and 0xFF
@@ -264,7 +271,14 @@ class FrameProcessor(
 
         if (samplesMm.isEmpty()) return null
         samplesMm.sort()
-        val medianMm = samplesMm[samplesMm.size / 2]
+
+        val trimCount = (samplesMm.size * TRIM_RATIO).toInt()
+        val trimmed = if (samplesMm.size - trimCount * 2 >= 1) {
+            samplesMm.subList(trimCount, samplesMm.size - trimCount)
+        } else {
+            samplesMm
+        }
+        val medianMm = trimmed[trimmed.size / 2]
         return medianMm / 1000f
     }
 
@@ -314,5 +328,14 @@ class FrameProcessor(
     companion object {
         private const val TAG = "FrameProcessor"
         private val CAMERA_ORIGIN = floatArrayOf(0f, 0f, 0f)
+
+        /** depth 다중 포인트 샘플링 격자 크기 (GRID_SIZE x GRID_SIZE 포인트). */
+        private const val GRID_SIZE = 5
+
+        /** 박스 가장자리(배경이 섞일 위험)를 피하기 위해 각 방향으로 안쪽으로 줄이는 비율. */
+        private const val INSET_RATIO = 0.15f
+
+        /** 정렬된 depth 샘플의 상하위 이 비율만큼을 이상치로 보고 잘라낸다. */
+        private const val TRIM_RATIO = 0.2f
     }
 }
