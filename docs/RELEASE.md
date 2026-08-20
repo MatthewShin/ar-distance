@@ -3,6 +3,11 @@
 작업을 완료할 때마다 날짜와 간단한 내용을 여기에 기록한다. 최신 항목이 위로 오도록 추가한다.
 [tasks/TODO.md](../tasks/TODO.md) 항목을 완료한 경우 해당 항목을 TODO.md에서 제거하고 여기에 기록한다 (규칙: [AGENTS.md](../AGENTS.md)).
 
+## 2026-08-20 — UI 디자인 고급화 + 고성능 모드 UX 단순화
+
+- `material-icons-extended` 아이콘, 앱 전용 다크 테마(`ArDistanceTheme`), 글래스 패널(`Modifier.glassPanel`), `AnimatedVisibility`/`LinearProgressIndicator` 애니메이션 적용 (실기기 확인 완료). Haze 블러 라이브러리는 Kotlin/Compose 버전 호환성 리스크로 제외
+- 고성능 모드 체크박스 제거 — 타겟 추적 중이면 별도 모드 선택 없이 "정밀 측정" 버튼이 항상 노출되도록 단순화
+
 ## 2026-08-20 — 고성능 모드 (다중 시점 삼각측량)
 
 - depth 센서 없이, 폰을 살짝 움직이며 모은 카메라 pose + 타겟 픽셀 위치(광선)만으로 3D 위치를 삼각측량하는 스냅샷 정밀측정 모드 추가. `geometry/RayTriangulator`(3x3 최소자승), `FrameProcessor.startPrecisionCapture()`(baseline 0.15m 도달 또는 4초 타임아웃 시 자동 확정)로 구현. 시작 화면에 "고성능 모드" 체크박스 추가, 트래킹 화면에 "정밀 측정" 버튼 + 진행률/결과/실패 안내 UI 추가. 기존 depth 기반 실시간 계산과 분리된 병행 경로라 일반 모드 동작에는 영향 없음 (실기기 확인 완료)
