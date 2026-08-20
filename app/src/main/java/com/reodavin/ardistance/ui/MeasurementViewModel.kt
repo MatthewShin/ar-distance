@@ -1,7 +1,6 @@
 package com.reodavin.ardistance.ui
 
 import androidx.lifecycle.ViewModel
-import com.reodavin.ardistance.pipeline.AccuracyMode
 import com.reodavin.ardistance.pipeline.FrameResult
 import com.reodavin.ardistance.pipeline.MeasurementMode
 import com.reodavin.ardistance.pipeline.MeasurementState
@@ -19,8 +18,8 @@ class MeasurementViewModel : ViewModel() {
     private val _state = MutableStateFlow<MeasurementState>(MeasurementState.SelectingMode)
     val state: StateFlow<MeasurementState> = _state
 
-    fun selectMode(mode: MeasurementMode, accuracyMode: AccuracyMode) {
-        _state.value = MeasurementState.SelectingBox1(mode, accuracyMode)
+    fun selectMode(mode: MeasurementMode) {
+        _state.value = MeasurementState.SelectingBox1(mode)
     }
 
     /**
@@ -31,24 +30,14 @@ class MeasurementViewModel : ViewModel() {
         return when (val current = _state.value) {
             is MeasurementState.SelectingBox1 -> {
                 _state.value = if (current.mode == MeasurementMode.ONE_TARGET) {
-                    MeasurementState.Tracking(
-                        mode = current.mode,
-                        accuracyMode = current.accuracyMode,
-                        box1 = rect,
-                        box2 = null,
-                    )
+                    MeasurementState.Tracking(mode = current.mode, box1 = rect, box2 = null)
                 } else {
-                    MeasurementState.SelectingBox2(mode = current.mode, accuracyMode = current.accuracyMode, box1 = rect)
+                    MeasurementState.SelectingBox2(mode = current.mode, box1 = rect)
                 }
                 0
             }
             is MeasurementState.SelectingBox2 -> {
-                _state.value = MeasurementState.Tracking(
-                    mode = current.mode,
-                    accuracyMode = current.accuracyMode,
-                    box1 = current.box1,
-                    box2 = rect,
-                )
+                _state.value = MeasurementState.Tracking(mode = current.mode, box1 = current.box1, box2 = rect)
                 1
             }
             is MeasurementState.SelectingMode, is MeasurementState.Tracking -> null
@@ -76,7 +65,7 @@ class MeasurementViewModel : ViewModel() {
         )
     }
 
-    /** 고성능 모드 스냅샷 정밀측정 진행 상태를 반영한다 (계획 §고성능 모드). */
+    /** 다중 시점 삼각측량 스냅샷 정밀측정 진행 상태를 반영한다. */
     fun updatePrecisionCapture(captureState: PrecisionCaptureState) {
         val current = _state.value as? MeasurementState.Tracking ?: return
         _state.value = current.copy(precisionCapture = captureState)
